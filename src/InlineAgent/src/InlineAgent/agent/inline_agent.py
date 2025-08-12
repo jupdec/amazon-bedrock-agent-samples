@@ -274,6 +274,7 @@ class InlineAgent:
         total_input_tokens = 0
         total_output_tokens = 0
         total_llm_calls = 0
+        all_traces = []  # Collect all traces
 
         time_before_call = datetime.now(UTC)
         cite = None
@@ -361,20 +362,18 @@ class InlineAgent:
                             tool_map=self.tool_map,
                         )
 
-                    # Process trace - debug what's in events
+                    # Collect traces
                     if "trace" in event:
-                        print("TRACE EVENT FOUND:")
-                        print(json.dumps(event["trace"], indent=2))
-                    else:
-                        print(f"Event keys: {list(event.keys())}")
-                        input_tokens, output_tokens, llm_calls = Trace.parse_trace(
-                            trace=event["trace"]["trace"],
-                            truncateResponse=truncate_response,
-                            agentName=self.agent_name,
-                        )
-                        total_input_tokens += int(input_tokens)
-                        total_output_tokens += int(output_tokens)
-                        total_llm_calls += int(llm_calls)
+                        all_traces.append(event["trace"])
+                        if "trace" in event["trace"]:
+                            input_tokens, output_tokens, llm_calls = Trace.parse_trace(
+                                trace=event["trace"]["trace"],
+                                truncateResponse=truncate_response,
+                                agentName=self.agent_name,
+                            )
+                            total_input_tokens += int(input_tokens)
+                            total_output_tokens += int(output_tokens)
+                            total_llm_calls += int(llm_calls)
 
                     # Get Final Answer
                     if "chunk" in event:
@@ -437,5 +436,25 @@ class InlineAgent:
                 TraceColor.stats,
             )
         )
+
+        # Store all traces at once
+        if all_traces:
+            try:
+                combined_traces = {
+                    "sessionId": session_id,
+                    "inputText": input_text,
+                    "agentName": self.agent_name,
+                    "timestamp": time_before_call.isoformat(),
+                    "duration": duration.total_seconds(),
+                    "tokenUsage": {"input": total_input_tokens, "output": total_output_tokens},
+                    "traces": all_traces
+                }
+                s3_client = self.session.client('s3', region_name='us-west-2')
+                bucket_name = 'inline-agent-test'
+                key = f"traces/{session_id}/complete_trace.json"
+                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
+                print(f"Complete trace stored to s3://{bucket_name}/{key}")
+            except Exception as e:
+                print(f"Failed to store complete trace to S3: {e}")
 
         return agent_answer
