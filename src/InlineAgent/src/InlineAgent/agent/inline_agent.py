@@ -281,7 +281,7 @@ class InlineAgent:
         sub_step = 0
 
         stream_final_response = streaming_configurations["streamFinalResponse"]
-        # print(self.get_invoke_params())
+        print(self.get_invoke_params())
         while not agent_answer:
             if inlineSessionState:
                 response = bedrock_agent_runtime.invoke_inline_agent(
@@ -314,7 +314,8 @@ class InlineAgent:
 
             try:
                 for event in event_stream:
-                    # print(json.dumps(event, indent=2, default=str))
+                    print(f"DEBUG: Processing event with keys: {list(event.keys())}")
+                    print(json.dumps(event, indent=2, default=str))  # Uncomment to see all events
                     if "files" in event:
                         files_event = event["files"]
 
@@ -360,10 +361,12 @@ class InlineAgent:
                             tool_map=self.tool_map,
                         )
 
-                    # Process trace
-                    if "trace" in event and "trace" in event["trace"] and enable_trace:
-
-                        # print(json.dumps(event["trace"], indent=2))
+                    # Process trace - debug what's in events
+                    if "trace" in event:
+                        print("TRACE EVENT FOUND:")
+                        print(json.dumps(event["trace"], indent=2))
+                    else:
+                        print(f"Event keys: {list(event.keys())}")
                         input_tokens, output_tokens, llm_calls = Trace.parse_trace(
                             trace=event["trace"]["trace"],
                             truncateResponse=truncate_response,
