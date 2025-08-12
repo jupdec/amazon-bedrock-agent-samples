@@ -3,6 +3,8 @@ from mcp import StdioServerParameters
 from InlineAgent.tools import MCPStdio
 from InlineAgent.action_group import ActionGroup
 from InlineAgent.agent import InlineAgent
+from InlineAgent.observability import ObservabilityConfig
+from InlineAgent.observability.process import ProcessL2Trace
 
 # Step 1: Define MCP stdio parameters
 server_params = StdioServerParameters(
@@ -12,6 +14,19 @@ server_params = StdioServerParameters(
 
 
 async def main():
+    # Configure observability
+    observe_config = ObservabilityConfig()
+    observe_config.PRODUCE_BEDROCK_OTEL_TRACES = True
+    
+    # Force saving traces
+    original_process_trace_event = ProcessL2Trace.process_trace_event
+    
+    def force_save_traces(trace_data, span_manager, save_traces, session_id, show_traces):
+        # Always save traces and show traces regardless of parameters
+        return original_process_trace_event(trace_data, span_manager, True, session_id, True)
+    
+    ProcessL2Trace.process_trace_event = force_save_traces
+    
     # Step 2: Create MCP Client
     time_mcp_client = await MCPStdio.create(server_params=server_params)
 
@@ -33,7 +48,8 @@ async def main():
             agent_name="time_agent",
             action_groups=[time_action_group],
         ).invoke(
-            input_text="Convert 12:30pm to Europe/London timezone? My timezone is America/New_York"
+            input_text="Convert 12:30pm to Europe/London timezone? My timezone is America/New_York",
+            enable_trace=True
         )
 
     finally:

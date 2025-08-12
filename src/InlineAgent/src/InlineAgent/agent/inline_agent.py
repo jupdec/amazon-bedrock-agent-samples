@@ -248,6 +248,7 @@ class InlineAgent:
         input_text: str,
         enable_trace: bool = True,
         session_id: str = str(uuid.uuid4()),
+        request_id: str = str(uuid.uuid4()),
         end_session: bool = False,
         session_state: Dict = None,
         add_citation: bool = False,
@@ -257,6 +258,7 @@ class InlineAgent:
         bedrock_model_configurations: Dict = {
             "performanceConfig": {"latency": "standard"}
         },
+        trace_bucket_name: Optional[str] = None,
     ):
         if session_state is None:
             session_state = {}
@@ -274,6 +276,7 @@ class InlineAgent:
         total_input_tokens = 0
         total_output_tokens = 0
         total_llm_calls = 0
+        all_traces = []  # Collect all traces
 
         time_before_call = datetime.now(UTC)
         cite = None
@@ -281,7 +284,7 @@ class InlineAgent:
         sub_step = 0
 
         stream_final_response = streaming_configurations["streamFinalResponse"]
-        # print(self.get_invoke_params())
+        print(self.get_invoke_params())
         while not agent_answer:
             if inlineSessionState:
                 response = bedrock_agent_runtime.invoke_inline_agent(
@@ -314,7 +317,8 @@ class InlineAgent:
 
             try:
                 for event in event_stream:
-                    # print(json.dumps(event, indent=2, default=str))
+                    print(f"DEBUG: Processing event with keys: {list(event.keys())}")
+                    print(json.dumps(event, indent=2, default=str))  # Uncomment to see all events
                     if "files" in event:
                         files_event = event["files"]
 
@@ -360,18 +364,18 @@ class InlineAgent:
                             tool_map=self.tool_map,
                         )
 
-                    # Process trace
-                    if "trace" in event and "trace" in event["trace"] and enable_trace:
-
-                        # print(json.dumps(event["trace"], indent=2))
-                        input_tokens, output_tokens, llm_calls = Trace.parse_trace(
-                            trace=event["trace"]["trace"],
-                            truncateResponse=truncate_response,
-                            agentName=self.agent_name,
-                        )
-                        total_input_tokens += int(input_tokens)
-                        total_output_tokens += int(output_tokens)
-                        total_llm_calls += int(llm_calls)
+                    # Collect traces
+                    if "trace" in event:
+                        all_traces.append(event["trace"])
+                        if "trace" in event["trace"]:
+                            input_tokens, output_tokens, llm_calls = Trace.parse_trace(
+                                trace=event["trace"]["trace"],
+                                truncateResponse=truncate_response,
+                                agentName=self.agent_name,
+                            )
+                            total_input_tokens += int(input_tokens)
+                            total_output_tokens += int(output_tokens)
+                            total_llm_calls += int(llm_calls)
 
                     # Get Final Answer
                     if "chunk" in event:
@@ -434,5 +438,25 @@ class InlineAgent:
                 TraceColor.stats,
             )
         )
+
+        # Store all traces at once
+        if all_traces:
+            try:
+                combined_traces = {
+                    "sessionId": session_id,
+                    "inputText": input_text,
+                    "agentName": self.agent_name,
+                    "timestamp": time_before_call.isoformat(),
+                    "duration": duration.total_seconds(),
+                    "tokenUsage": {"input": total_input_tokens, "output": total_output_tokens},
+                    "traces": all_traces
+                }
+                s3_client = self.session.client('s3')
+                bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
+                key = f"sessions/{session_id}/{request_id}/trace.json"
+                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
+                print(f"Complete trace stored to s3://{bucket_name}/{key}")
+            except Exception as e:
+                print(f"Failed to store complete trace to S3: {e}")
 
         return agent_answer
