@@ -257,6 +257,7 @@ class InlineAgent:
         bedrock_model_configurations: Dict = {
             "performanceConfig": {"latency": "standard"}
         },
+        trace_bucket_name: Optional[str] = None,
     ):
         if session_state is None:
             session_state = {}
@@ -449,8 +450,9 @@ class InlineAgent:
                     "tokenUsage": {"input": total_input_tokens, "output": total_output_tokens},
                     "traces": all_traces
                 }
-                s3_client = self.session.client('s3', region_name='us-west-2')
-                bucket_name = 'inline-agent-test'
+                # Use the region from the session instead of hardcoding it
+                s3_client = self.session.client('s3')
+                bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
                 key = f"traces/{session_id}/complete_trace.json"
                 s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
                 print(f"Complete trace stored to s3://{bucket_name}/{key}")
