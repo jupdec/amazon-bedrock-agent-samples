@@ -453,7 +453,7 @@ class InlineAgent:
                 # Use the region from the session instead of hardcoding it
                 s3_client = self.session.client('s3')
                 bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
-                key = f"{session_id}/trace.json"
+                key = f"sessions/{session_id}.json"
                 s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
                 print(f"Complete trace stored to s3://{bucket_name}/{key}")
             except Exception as e:
