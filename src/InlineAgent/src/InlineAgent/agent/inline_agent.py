@@ -6,6 +6,7 @@ import uuid
 import copy
 import os
 import boto3
+from decimal import Decimal
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import Field
 from termcolor import colored
@@ -259,6 +260,7 @@ class InlineAgent:
             "performanceConfig": {"latency": "standard"}
         },
         trace_bucket_name: Optional[str] = None,
+        dynamodb_table_name: Optional[str] = "agent-sessions-table",
     ):
         if session_state is None:
             session_state = {}
@@ -366,16 +368,133 @@ class InlineAgent:
 
                     # Collect traces
                     if "trace" in event:
+                        print(f"DEBUG: Found trace event with keys: {list(event['trace'].keys())}")
                         all_traces.append(event["trace"])
-                        if "trace" in event["trace"]:
-                            input_tokens, output_tokens, llm_calls = Trace.parse_trace(
-                                trace=event["trace"]["trace"],
-                                truncateResponse=truncate_response,
-                                agentName=self.agent_name,
-                            )
-                            total_input_tokens += int(input_tokens)
-                            total_output_tokens += int(output_tokens)
-                            total_llm_calls += int(llm_calls)
+                        
+                        # Store EVERY trace event in DynamoDB and S3
+                        try:
+                            print(f"DEBUG: Storing trace event")
+                            trace_id = str(uuid.uuid4())
+                            timestamp = datetime.now(UTC).isoformat()
+                            
+                            # Determine trace type and extract token info if available
+                            trace_type = "unknown"
+                            input_tokens = 0
+                            output_tokens = 0
+                            llm_calls = 0
+                            
+                            if "trace" in event["trace"]:
+                                # This is an LLM execution trace
+                                trace_type = "llm_execution"
+                                input_tokens, output_tokens, llm_calls = Trace.parse_trace(
+                                    trace=event["trace"]["trace"],
+                                    truncateResponse=truncate_response,
+                                    agentName=self.agent_name,
+                                )
+                                total_input_tokens += int(input_tokens)
+                                total_output_tokens += int(output_tokens)
+                                total_llm_calls += int(llm_calls)
+                            else:
+                                # This is another type of trace (orchestration, preprocessing, etc.)
+                                if "orchestrationTrace" in event["trace"]:
+                                    trace_type = "orchestration"
+                                elif "preProcessingTrace" in event["trace"]:
+                                    trace_type = "preprocessing"
+                                elif "postProcessingTrace" in event["trace"]:
+                                    trace_type = "postprocessing"
+                                elif "guardrailTrace" in event["trace"]:
+                                    trace_type = "guardrail"
+                            
+                            # Create trace data for S3
+                            trace_data = {
+                                "sessionId": session_id,
+                                "requestId": request_id,
+                                "traceId": trace_id,
+                                "inputText": input_text,
+                                "agentName": self.agent_name,
+                                "timestamp": timestamp,
+                                "traceType": trace_type,
+                                "tokenUsage": {"input": int(input_tokens), "output": int(output_tokens)} if input_tokens or output_tokens else None,
+                                "trace": event["trace"]
+                            }
+                            
+                            # Store in S3
+                            if trace_bucket_name:
+                                s3_client = self.session.client('s3')
+                                bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
+                                
+                                # Create the traces directory path
+                                traces_dir = f"sessions/{session_id}/{request_id}/traces/"
+                                key = f"{traces_dir}{trace_id}.json"
+                                
+                                print(f"DEBUG: Storing trace to s3://{bucket_name}/{key}")
+                                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(trace_data, default=str, indent=2))
+                                print(f"SUCCESS: Trace stored to s3://{bucket_name}/{key}")
+                            
+                            # Store in DynamoDB - convert trace data to DynamoDB-compatible format
+                            print(f"DEBUG: DynamoDB table name: {dynamodb_table_name}")
+                            if dynamodb_table_name:
+                                try:
+                                    dynamodb = self.session.resource('dynamodb')
+                                    table = dynamodb.Table(dynamodb_table_name)
+                                    
+                                    # Convert trace data to JSON string to handle datetime objects - only capture specific orchestrationTrace fields
+                                    orchestration_trace = event["trace"].get("orchestrationTrace")
+                                    if orchestration_trace:
+                                        print(f"DEBUG: Found orchestrationTrace with keys: {list(orchestration_trace.keys())}")
+                                        # Extract only rationale, observation, modelInvocationInput, or modelInvocationOutput from orchestrationTrace
+                                        filtered_trace = {}
+                                        if "rationale" in orchestration_trace:
+                                            filtered_trace["rationale"] = orchestration_trace["rationale"]
+                                            print(f"DEBUG: Captured rationale")
+                                        if "observation" in orchestration_trace:
+                                            filtered_trace["observation"] = orchestration_trace["observation"]
+                                            print(f"DEBUG: Captured observation")
+                                        if "modelInvocationInput" in orchestration_trace:
+                                            filtered_trace["modelInvocationInput"] = orchestration_trace["modelInvocationInput"]
+                                            print(f"DEBUG: Captured modelInvocationInput")
+                                        if "modelInvocationOutput" in orchestration_trace:
+                                            # For modelInvocationOutput, we might want to capture specific sub-fields
+                                            model_output = orchestration_trace["modelInvocationOutput"]
+                                            filtered_output = {}
+                                            
+                                            # Capture metadata (contains usage info)
+                                            if "metadata" in model_output:
+                                                filtered_output["metadata"] = model_output["metadata"]
+                                            
+                                            # Capture rawResponse but potentially filter it
+                                            if "rawResponse" in model_output:
+                                                raw_response = model_output["rawResponse"]
+                                                # Store the raw response as-is for now, but you could filter specific fields
+                                                filtered_output["rawResponse"] = raw_response
+                                            
+                                            filtered_trace["modelInvocationOutput"] = filtered_output
+                                            print(f"DEBUG: Captured modelInvocationOutput with metadata and rawResponse")
+                                        
+                                        trace_json = json.dumps(filtered_trace, default=str)
+                                        print(f"DEBUG: Filtered trace JSON length: {len(trace_json)} characters")
+                                    else:
+                                        print(f"DEBUG: No orchestrationTrace found in event trace")
+                                        trace_json = json.dumps({}, default=str)
+                                    
+                                    # Create simple DynamoDB item with trace data as JSON string
+                                    dynamodb_item = {
+                                        'sessionId': session_id,
+                                        'requestId': f"{request_id}_{trace_id}",  # Make each trace unique
+                                        'timestamp': timestamp,
+                                        'ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),  # 30 days TTL
+                                        'trace': trace_json  # Store trace data as JSON string
+                                    }
+                                    
+                                    table.put_item(Item=dynamodb_item)
+                                    print(f"SUCCESS: Raw trace stored to DynamoDB table: {dynamodb_table_name}")
+                                    
+                                except Exception as dynamo_error:
+                                    print(f"ERROR: Failed to store trace to DynamoDB: {dynamo_error}")
+                            
+                        except Exception as e:
+                            print(f"ERROR: Failed to store trace: {e}")
+                            print(f"ERROR: Trace event keys: {list(event.get('trace', {}).keys()) if 'trace' in event else 'No trace in event'}")
 
                     # Get Final Answer
                     if "chunk" in event:
@@ -439,24 +558,109 @@ class InlineAgent:
             )
         )
 
-        # Store all traces at once
+        # Store summary of all traces and ensure we don't store the old combined trace file
         if all_traces:
             try:
-                combined_traces = {
+                # Create summary data
+                summary_data = {
                     "sessionId": session_id,
                     "inputText": input_text,
                     "agentName": self.agent_name,
                     "timestamp": time_before_call.isoformat(),
                     "duration": duration.total_seconds(),
                     "tokenUsage": {"input": total_input_tokens, "output": total_output_tokens},
-                    "traces": all_traces
+                    "totalLlmCalls": total_llm_calls,
+                    "traceCount": len(all_traces)
                 }
+                
+                # Store summary
                 s3_client = self.session.client('s3')
                 bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
-                key = f"sessions/{session_id}/{request_id}/trace.json"
-                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
-                print(f"Complete trace stored to s3://{bucket_name}/{key}")
+                summary_key = f"sessions/{session_id}/{request_id}/summary.json"
+                s3_client.put_object(Bucket=bucket_name, Key=summary_key, Body=json.dumps(summary_data, default=str, indent=2))
+                print(f"Trace summary stored to s3://{bucket_name}/{summary_key}")
+                
+                # Store session summary in DynamoDB
+                if dynamodb_table_name:
+                    try:
+                        dynamodb = self.session.resource('dynamodb')
+                        table = dynamodb.Table(dynamodb_table_name)
+                        
+                        # Create DynamoDB summary item
+                        summary_item = {
+                            'sessionId': session_id,
+                            'requestId': f"{request_id}_summary",
+                            'agentName': self.agent_name,
+                            'inputText': input_text,
+                            'timestamp': time_before_call.isoformat(),
+                            'duration': Decimal(str(duration.total_seconds())),
+                            'tokenUsage': {
+                                'input': total_input_tokens,
+                                'output': total_output_tokens,
+                                'total': total_input_tokens + total_output_tokens
+                            },
+                            'totalLlmCalls': total_llm_calls,
+                            'traceCount': len(all_traces),
+                            's3SummaryLocation': f"s3://{bucket_name}/{summary_key}",
+                            'ttl': int((datetime.now(UTC).timestamp() + 86400 * 30))  # 30 days TTL
+                        }
+                        
+                        table.put_item(Item=summary_item)
+                        print(f"SUCCESS: Session summary stored to DynamoDB table: {dynamodb_table_name}")
+                    except Exception as dynamo_error:
+                        print(f"ERROR: Failed to store session summary to DynamoDB: {dynamo_error}")
+                
+                # Check if there's an old combined trace file and remove it
+                try:
+                    old_trace_key = f"sessions/{session_id}/{request_id}/trace.json"
+                    response = s3_client.list_objects_v2(
+                        Bucket=bucket_name,
+                        Prefix=old_trace_key
+                    )
+                    
+                    if 'Contents' in response:
+                        print(f"WARNING: Found old combined trace file at {old_trace_key}. This file is no longer needed.")
+                        # Uncomment the following line to delete the old trace file
+                        # s3_client.delete_object(Bucket=bucket_name, Key=old_trace_key)
+                        # print(f"Deleted old combined trace file: {old_trace_key}")
+                except Exception as e:
+                    print(f"Error checking for old trace file: {e}")
+                
+                # List objects to check if individual traces were stored
+                try:
+                    response = s3_client.list_objects_v2(
+                        Bucket=bucket_name,
+                        Prefix=f"sessions/{session_id}/{request_id}/traces/"
+                    )
+                    
+                    if 'Contents' in response:
+                        trace_count = len(response['Contents'])
+                        print(f"Found {trace_count} individual trace files in S3")
+                    else:
+                        print("WARNING: No individual trace files found in S3. They may not have been stored correctly.")
+                        
+                        # If no individual traces were found, store them now as a fallback
+                        print("Storing individual traces as a fallback...")
+                        for idx, trace in enumerate(all_traces):
+                            try:
+                                trace_data = {
+                                    "sessionId": session_id,
+                                    "inputText": input_text,
+                                    "agentName": self.agent_name,
+                                    "timestamp": datetime.now(UTC).isoformat(),
+                                    "trace": trace
+                                }
+                                trace_id = str(uuid.uuid4())
+                                traces_dir = f"sessions/{session_id}/{request_id}/traces/"
+                                key = f"{traces_dir}{trace_id}.json"
+                                
+                                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(trace_data, default=str, indent=2))
+                                print(f"Fallback: Stored trace {idx+1}/{len(all_traces)} to s3://{bucket_name}/{key}")
+                            except Exception as e:
+                                print(f"Failed to store fallback trace: {e}")
+                except Exception as list_error:
+                    print(f"Error listing trace files: {list_error}")
             except Exception as e:
-                print(f"Failed to store complete trace to S3: {e}")
+                print(f"Failed to store trace summary to S3: {e}")
 
         return agent_answer
