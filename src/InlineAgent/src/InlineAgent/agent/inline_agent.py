@@ -6,6 +6,8 @@ import uuid
 import copy
 import os
 import boto3
+from decimal import Decimal
+from decimal import Decimal
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import Field
 from termcolor import colored
@@ -259,6 +261,7 @@ class InlineAgent:
             "performanceConfig": {"latency": "standard"}
         },
         trace_bucket_name: Optional[str] = None,
+        dynamodb_table_name: Optional[str] = "agent-sessions-table",
     ):
         if session_state is None:
             session_state = {}
@@ -366,16 +369,144 @@ class InlineAgent:
 
                     # Collect traces
                     if "trace" in event:
+                        print(f"DEBUG: Found trace event with keys: {list(event['trace'].keys())}")
                         all_traces.append(event["trace"])
-                        if "trace" in event["trace"]:
-                            input_tokens, output_tokens, llm_calls = Trace.parse_trace(
-                                trace=event["trace"]["trace"],
-                                truncateResponse=truncate_response,
-                                agentName=self.agent_name,
-                            )
-                            total_input_tokens += int(input_tokens)
-                            total_output_tokens += int(output_tokens)
-                            total_llm_calls += int(llm_calls)
+                        
+                        # Store EVERY trace event in DynamoDB and S3
+                        try:
+                            print(f"DEBUG: Storing trace event")
+                            trace_id = str(uuid.uuid4())
+                            timestamp = datetime.now(UTC).isoformat()
+                            
+                            # Determine trace type and extract token info if available
+                            trace_type = "unknown"
+                            input_tokens = 0
+                            output_tokens = 0
+                            llm_calls = 0
+                            
+                            if "trace" in event["trace"]:
+                                # This is an LLM execution trace
+                                trace_type = "llm_execution"
+                                input_tokens, output_tokens, llm_calls = Trace.parse_trace(
+                                    trace=event["trace"]["trace"],
+                                    truncateResponse=truncate_response,
+                                    agentName=self.agent_name,
+                                )
+                                total_input_tokens += int(input_tokens)
+                                total_output_tokens += int(output_tokens)
+                                total_llm_calls += int(llm_calls)
+                            else:
+                                # This is another type of trace (orchestration, preprocessing, etc.)
+                                if "orchestrationTrace" in event["trace"]:
+                                    trace_type = "orchestration"
+                                elif "preProcessingTrace" in event["trace"]:
+                                    trace_type = "preprocessing"
+                                elif "postProcessingTrace" in event["trace"]:
+                                    trace_type = "postprocessing"
+                                elif "guardrailTrace" in event["trace"]:
+                                    trace_type = "guardrail"
+                            
+                            # Create trace data for S3
+                            trace_data = {
+                                "sessionId": session_id,
+                                "requestId": request_id,
+                                "traceId": trace_id,
+                                "inputText": input_text,
+                                "agentName": self.agent_name,
+                                "timestamp": timestamp,
+                                "traceType": trace_type,
+                                "tokenUsage": {"input": int(input_tokens), "output": int(output_tokens)} if input_tokens or output_tokens else None,
+                                "trace": event["trace"]
+                            }
+                            
+
+                            # Store only rationale traces in DynamoDB
+                            print(f"DEBUG: DynamoDB table name: {dynamodb_table_name}")
+                            print(f"DEBUG: Checking trace structure: {list(event['trace'].keys())}")
+                            if dynamodb_table_name:
+                                try:
+                                    # Check if this trace has rationale
+                                    # Handle both direct orchestrationTrace and nested trace.orchestrationTrace
+                                    orchestration_trace = event["trace"].get("orchestrationTrace")
+                                    if not orchestration_trace and "trace" in event["trace"]:
+                                        orchestration_trace = event["trace"]["trace"].get("orchestrationTrace")
+                                    
+                                    if orchestration_trace and "rationale" in orchestration_trace:
+                                        rationale_text = orchestration_trace["rationale"].get("text", "")
+                                        print(f"🧠 RATIONALE FOUND: {rationale_text[:100]}...")
+                                        
+                                        # Only store if we have rationale text
+                                        if rationale_text:
+                                            print(f"💾 STORING RATIONALE TO DYNAMODB")
+                                            dynamodb = self.session.resource('dynamodb')
+                                            table = dynamodb.Table(dynamodb_table_name)
+                                            print(f"DEBUG: DynamoDB table connection established")
+                                            
+                                            # Check if session item exists (using our table schema)
+                                            response = table.get_item(
+                                                Key={
+                                                    'session_id': session_id
+                                                }
+                                            )
+                                            
+                                            if 'Item' in response:
+                                                # Item exists, append to thinking list
+                                                existing_thinking = response['Item'].get('thinking', [])
+                                                
+                                                # Handle backward compatibility - convert string to list if needed
+                                                if isinstance(existing_thinking, str):
+                                                    existing_thinking = [existing_thinking] if existing_thinking else []
+                                                elif not isinstance(existing_thinking, list):
+                                                    existing_thinking = []
+                                                
+                                                # Append new rationale to the list
+                                                new_thinking = existing_thinking + [rationale_text]
+                                                
+                                                # Update the item (using our table schema)
+                                                table.update_item(
+                                                    Key={
+                                                        'session_id': session_id
+                                                    },
+                                                    UpdateExpression='SET thinking = :thinking, lastUpdated = :timestamp, #ttl = :ttl, request_id = :request_id, request_state = :request_state',
+                                                    ExpressionAttributeNames={
+                                                        '#ttl': 'ttl'
+                                                    },
+                                                    ExpressionAttributeValues={
+                                                        ':thinking': new_thinking,
+                                                        ':timestamp': timestamp,
+                                                        ':ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),
+                                                        ':request_id': request_id,
+                                                        ':request_state': 'processing'
+                                                    }
+                                                )
+                                                print(f"SUCCESS: Appended rationale to existing thinking list (now {len(new_thinking)} items)")
+                                            
+                                            else:
+                                                # Item doesn't exist, create new with thinking list (using our table schema)
+                                                print(f"DEBUG: Creating new DynamoDB item")
+                                                dynamodb_item = {
+                                                    'session_id': session_id,  # Changed to snake_case
+                                                    'request_id': request_id,   # Changed to snake_case and made it an attribute, not key
+                                                    'agentName': self.agent_name,
+                                                    'inputText': input_text,
+                                                    'timestamp': timestamp,
+                                                    'lastUpdated': timestamp,
+                                                    'ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),
+                                                    'thinking': [rationale_text],
+                                                    'request_state': 'processing'  # Add request_state for compatibility
+                                                }
+                                                
+                                                table.put_item(Item=dynamodb_item)
+                                                print(f"SUCCESS: Created new item with thinking list (1 item)")
+                                            
+                                            print(f"SUCCESS: Rationale stored: {rationale_text[:50]}...")
+                                    
+                                except Exception as dynamo_error:
+                                    print(f"ERROR: Failed to store rationale to DynamoDB: {dynamo_error}")
+                            
+                        except Exception as e:
+                            print(f"ERROR: Failed to store trace: {e}")
+                            print(f"ERROR: Trace event keys: {list(event.get('trace', {}).keys()) if 'trace' in event else 'No trace in event'}")
 
                     # Get Final Answer
                     if "chunk" in event:
@@ -439,24 +570,29 @@ class InlineAgent:
             )
         )
 
-        # Store all traces at once
+        # Store summary of all traces and ensure we don't store the old combined trace file
         if all_traces:
             try:
-                combined_traces = {
+                # Create summary data
+                summary_data = {
                     "sessionId": session_id,
                     "inputText": input_text,
                     "agentName": self.agent_name,
                     "timestamp": time_before_call.isoformat(),
                     "duration": duration.total_seconds(),
                     "tokenUsage": {"input": total_input_tokens, "output": total_output_tokens},
-                    "traces": all_traces
+                    "totalLlmCalls": total_llm_calls,
+                    "traceCount": len(all_traces)
                 }
+                
+                # Store summary
                 s3_client = self.session.client('s3')
                 bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
-                key = f"sessions/{session_id}/{request_id}/trace.json"
-                s3_client.put_object(Bucket=bucket_name, Key=key, Body=json.dumps(combined_traces, default=str, indent=2))
-                print(f"Complete trace stored to s3://{bucket_name}/{key}")
+                summary_key = f"sessions/{session_id}/{request_id}/summary.json"
+                s3_client.put_object(Bucket=bucket_name, Key=summary_key, Body=json.dumps(summary_data, default=str, indent=2))
+                print(f"Trace summary stored to s3://{bucket_name}/{summary_key}")
+
             except Exception as e:
-                print(f"Failed to store complete trace to S3: {e}")
+                print(f"Failed to store trace summary to S3: {e}")
 
         return agent_answer

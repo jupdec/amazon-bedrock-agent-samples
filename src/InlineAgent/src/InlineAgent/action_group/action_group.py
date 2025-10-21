@@ -9,10 +9,14 @@ from typing import (
     Callable,
     Literal,
     Optional,
-    Self,
     Tuple,
     Union,
 )
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 from inspect import Parameter, signature
 import boto3
 from pydantic import BaseModel, computed_field, model_validator, validate_call, Field
