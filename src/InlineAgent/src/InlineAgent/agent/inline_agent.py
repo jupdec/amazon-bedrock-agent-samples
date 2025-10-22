@@ -451,13 +451,17 @@ class InlineAgent:
                                             )
                                             
                                             if 'Item' in response:
-                                                # Item exists, append to thinking field
-                                                existing_thinking = response['Item'].get('thinking', '')
+                                                # Item exists, append to thinking list
+                                                existing_thinking = response['Item'].get('thinking', [])
                                                 
-                                                if existing_thinking:
-                                                    new_thinking = existing_thinking + "\n" + rationale_text
-                                                else:
-                                                    new_thinking = rationale_text
+                                                # Handle backward compatibility - convert string to list if needed
+                                                if isinstance(existing_thinking, str):
+                                                    existing_thinking = [existing_thinking] if existing_thinking else []
+                                                elif not isinstance(existing_thinking, list):
+                                                    existing_thinking = []
+                                                
+                                                # Append new rationale to the list
+                                                new_thinking = existing_thinking + [rationale_text]
                                                 
                                                 # Update the item
                                                 table.update_item(
@@ -475,10 +479,10 @@ class InlineAgent:
                                                         ':ttl': int((datetime.now(UTC).timestamp() + 86400 * 30))
                                                     }
                                                 )
-                                                print(f"SUCCESS: Appended rationale to existing thinking field")
+                                                print(f"SUCCESS: Appended rationale to existing thinking list (now {len(new_thinking)} items)")
                                             
                                             else:
-                                                # Item doesn't exist, create new with thinking field
+                                                # Item doesn't exist, create new with thinking list
                                                 print(f"DEBUG: Creating new DynamoDB item")
                                                 dynamodb_item = {
                                                     'sessionId': session_id,
@@ -488,11 +492,11 @@ class InlineAgent:
                                                     'timestamp': timestamp,
                                                     'lastUpdated': timestamp,
                                                     'ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),
-                                                    'thinking': rationale_text
+                                                    'thinking': [rationale_text]
                                                 }
                                                 
                                                 table.put_item(Item=dynamodb_item)
-                                                print(f"SUCCESS: Created new item with thinking field")
+                                                print(f"SUCCESS: Created new item with thinking list (1 item)")
                                             
                                             print(f"SUCCESS: Rationale stored: {rationale_text[:50]}...")
                                     
