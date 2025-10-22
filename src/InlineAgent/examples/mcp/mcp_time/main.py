@@ -1,6 +1,11 @@
 import argparse
 import uuid
+import sys
+import os
 from mcp import StdioServerParameters
+
+# Add the local source directory to use our updated rationale storage code
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
 
 from InlineAgent.tools import MCPStdio
 from InlineAgent.action_group import ActionGroup
