@@ -7,6 +7,7 @@ import copy
 import os
 import boto3
 from decimal import Decimal
+from decimal import Decimal
 from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import Field
 from termcolor import colored
