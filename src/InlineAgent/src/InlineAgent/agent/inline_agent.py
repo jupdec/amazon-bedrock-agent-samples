@@ -442,11 +442,10 @@ class InlineAgent:
                                             table = dynamodb.Table(dynamodb_table_name)
                                             print(f"DEBUG: DynamoDB table connection established")
                                             
-                                            # Check if session/request item exists
+                                            # Check if session item exists (using our table schema)
                                             response = table.get_item(
                                                 Key={
-                                                    'sessionId': session_id,
-                                                    'requestId': request_id
+                                                    'session_id': session_id
                                                 }
                                             )
                                             
@@ -463,36 +462,38 @@ class InlineAgent:
                                                 # Append new rationale to the list
                                                 new_thinking = existing_thinking + [rationale_text]
                                                 
-                                                # Update the item
+                                                # Update the item (using our table schema)
                                                 table.update_item(
                                                     Key={
-                                                        'sessionId': session_id,
-                                                        'requestId': request_id
+                                                        'session_id': session_id
                                                     },
-                                                    UpdateExpression='SET thinking = :thinking, lastUpdated = :timestamp, #ttl = :ttl',
+                                                    UpdateExpression='SET thinking = :thinking, lastUpdated = :timestamp, #ttl = :ttl, request_id = :request_id, request_state = :request_state',
                                                     ExpressionAttributeNames={
                                                         '#ttl': 'ttl'
                                                     },
                                                     ExpressionAttributeValues={
                                                         ':thinking': new_thinking,
                                                         ':timestamp': timestamp,
-                                                        ':ttl': int((datetime.now(UTC).timestamp() + 86400 * 30))
+                                                        ':ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),
+                                                        ':request_id': request_id,
+                                                        ':request_state': 'processing'
                                                     }
                                                 )
                                                 print(f"SUCCESS: Appended rationale to existing thinking list (now {len(new_thinking)} items)")
                                             
                                             else:
-                                                # Item doesn't exist, create new with thinking list
+                                                # Item doesn't exist, create new with thinking list (using our table schema)
                                                 print(f"DEBUG: Creating new DynamoDB item")
                                                 dynamodb_item = {
-                                                    'sessionId': session_id,
-                                                    'requestId': request_id,
+                                                    'session_id': session_id,  # Changed to snake_case
+                                                    'request_id': request_id,   # Changed to snake_case and made it an attribute, not key
                                                     'agentName': self.agent_name,
                                                     'inputText': input_text,
                                                     'timestamp': timestamp,
                                                     'lastUpdated': timestamp,
                                                     'ttl': int((datetime.now(UTC).timestamp() + 86400 * 30)),
-                                                    'thinking': [rationale_text]
+                                                    'thinking': [rationale_text],
+                                                    'request_state': 'processing'  # Add request_state for compatibility
                                                 }
                                                 
                                                 table.put_item(Item=dynamodb_item)
