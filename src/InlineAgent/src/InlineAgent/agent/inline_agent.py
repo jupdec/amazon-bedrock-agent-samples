@@ -536,7 +536,7 @@ class InlineAgent:
                 # Store summary
                 s3_client = self.session.client('s3')
                 bucket_name = trace_bucket_name or 'eks_beaver_inline_agent_logs'
-                summary_key = f"sessions/{session_id}/{request_id}/summary.json"
+                summary_key = f"sessions/{session_id}/{request_id}/trace.json"
                 s3_client.put_object(Bucket=bucket_name, Key=summary_key, Body=json.dumps(summary_data, default=str, indent=2))
                 print(f"Trace summary stored to s3://{bucket_name}/{summary_key}")
 
