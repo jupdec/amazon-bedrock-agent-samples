@@ -378,6 +378,7 @@ class InlineAgent:
                     print(f"DEBUG: Processing event with keys: {list(event.keys())}")
                     print(json.dumps(event, indent=2, default=str))  # Uncomment to see all events
                     if "files" in event:
+                        all_traces.append(event["files"])
                         files_event = event["files"]
 
                         console = Console()
@@ -416,6 +417,7 @@ class InlineAgent:
                                 f.write(file_bytes)
 
                     if "returnControl" in event:
+                        all_traces.append(event["returnControl"])
                         inlineSessionState = await ProcessROC.process_roc(
                             inlineSessionState=inlineSessionState,
                             roc_event=event["returnControl"],
@@ -458,6 +460,7 @@ class InlineAgent:
 
                     # Get Final Answer
                     if "chunk" in event:
+                        all_traces.append(event["chunk"])
                         if add_citation:
                             if "attribution" in event["chunk"]:
                                 agent_answer, cite = Trace.add_citation(
